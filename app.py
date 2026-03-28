@@ -186,7 +186,7 @@ def orbit_trails_eci_cached(selected_tles, points_per_orbit=140):
     return trails
 
 
-def _base_figure(trails=None, earth_trace=None, height=920):
+def _base_figure(trails=None, earth_trace=None, height=920, lim=30000):
     fig = go.Figure()
 
     if earth_trace is not None:
@@ -248,7 +248,6 @@ def _base_figure(trails=None, earth_trace=None, height=920):
                 )
             )
 
-    lim = 30000
     fig.update_layout(
         scene=dict(
             xaxis_title="X (km)",
@@ -382,6 +381,14 @@ def render_constellation(
     if show_trails:
         trails = orbit_trails_eci_cached(tuple(selected_tles), points_per_orbit=trail_points)
 
+    # Dynamic axis limit so high-altitude BeiDou GEO orbits are not clipped.
+    max_r = float(np.max(np.linalg.norm(positions, axis=1))) if len(positions) else R_EARTH_KM
+    if trails:
+        for pts in trails.values():
+            if len(pts):
+                max_r = max(max_r, float(np.max(np.linalg.norm(pts, axis=1))))
+    lim = int(max(30000, max_r * 1.10))
+
     static_signature = (
         bool(show_trails),
         tuple(s.name for s in selected),
@@ -390,13 +397,14 @@ def render_constellation(
         bool(earth_trace is not None),
         int(trail_points),
         title,
+        lim,
     )
     sig_key = f"{key_prefix}_static_signature"
     fig_key = f"{key_prefix}_static_fig"
 
     if st.session_state.get(sig_key) != static_signature:
         st.session_state[sig_key] = static_signature
-        st.session_state[fig_key] = _base_figure(trails=trails, earth_trace=earth_trace, height=view_height)
+        st.session_state[fig_key] = _base_figure(trails=trails, earth_trace=earth_trace, height=view_height, lim=lim)
 
     fig = go.Figure(st.session_state[fig_key])
     mode = "markers+text" if labels else "markers"
