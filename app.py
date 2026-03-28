@@ -51,7 +51,7 @@ def fetch_earth_texture(urls, width: int = 2048, height: int = 1024):
     raise RuntimeError(f"Could not load Earth texture from any source: {last_err}")
 
 
-def earth_mesh_with_texture(radius_km: float, texture: np.ndarray, n_lon=180, n_lat=90, opacity=0.75):
+def earth_mesh_with_texture(radius_km: float, texture: np.ndarray, n_lon=360, n_lat=180, opacity=0.75):
     lons = np.linspace(-np.pi, np.pi, n_lon)
     lats = np.linspace(-np.pi / 2, np.pi / 2, n_lat)
 
@@ -93,6 +93,8 @@ def earth_mesh_with_texture(radius_km: float, texture: np.ndarray, n_lon=180, n_
         name="Earth (textured)",
         hoverinfo="skip",
         flatshading=False,
+        lighting=dict(ambient=0.65, diffuse=0.75, specular=0.08, roughness=0.95, fresnel=0.02),
+        lightposition=dict(x=120000, y=80000, z=100000),
     )
 
 
