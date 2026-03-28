@@ -10,15 +10,16 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 from io import BytesIO
+from pathlib import Path
 from skyfield.api import EarthSatellite, load, wgs84
 from skyfield.framelib import itrs
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
+LOCAL_TEXTURE_PATH = Path(__file__).parent / "assets" / "earth_2048.png"
 EARTH_TEXTURE_URLS = [
-    "https://raw.githubusercontent.com/plotly/datasets/master/earth.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/2c/Blue_Marble_2002.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/04/Solarsystemscope_texture_8k_earth_daymap.jpg",
+    "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.png",
+    "https://www.solarsystemscope.com/textures/download/2k_earth_daymap.jpg",
 ]
 
 
@@ -29,14 +30,20 @@ def _hex_to_rgb(hex_color: str):
 
 @st.cache_data(ttl=86400)
 def fetch_earth_texture(urls, width: int = 2048, height: int = 1024):
+    # Prefer bundled local texture (most reliable for cloud deployments)
+    if LOCAL_TEXTURE_PATH.exists():
+        img = Image.open(LOCAL_TEXTURE_PATH).convert("RGB")
+        img = img.resize((width, height), Image.Resampling.LANCZOS)
+        return np.array(img), f"local:{LOCAL_TEXTURE_PATH.name}"
+
     last_err = None
     for url in urls:
         try:
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
             r.raise_for_status()
             img = Image.open(BytesIO(r.content)).convert("RGB")
             img = img.resize((width, height), Image.Resampling.LANCZOS)
-            return np.array(img)
+            return np.array(img), url
         except Exception as e:
             last_err = e
             continue
@@ -257,8 +264,9 @@ def main():
         return
 
     earth_trace = None
+    texture_source = None
     try:
-        texture = fetch_earth_texture(EARTH_TEXTURE_URLS)
+        texture, texture_source = fetch_earth_texture(EARTH_TEXTURE_URLS)
         earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
     except Exception as e:
         st.warning(f"Earth texture unavailable, using fallback sphere. Details: {e}")
@@ -282,6 +290,8 @@ def main():
 
     st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
     st.plotly_chart(make_figure(names, positions, labels=labels, trails=trails, earth_trace=earth_trace), width="stretch", config={"scrollZoom": False})
+    if texture_source:
+        st.caption(f"Earth texture source: {texture_source}")
 
     if visible_only:
         st.caption("Visibility criterion: elevation angle > 0° from observer location.")
