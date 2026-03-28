@@ -17,6 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
+BEIDOU_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=beidou&FORMAT=tle"
 LOCAL_TEXTURE_PATH = Path(__file__).parent / "assets" / "earth_beauty.jpg"
 EARTH_TEXTURE_URLS = [
     "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.png",
@@ -290,7 +291,7 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None, h
     return fig
 
 
-def render_smooth_clientside(fig: go.Figure, names, series, height: int, interval_ms: int = 30000):
+def render_smooth_clientside(fig: go.Figure, names, series, height: int, interval_ms: int = 30000, div_id: str = "gps_plotly"):
     fig_dict = fig.to_dict()
     sat_trace_idx = len(fig_dict.get("data", [])) - 1
 
@@ -303,11 +304,11 @@ def render_smooth_clientside(fig: go.Figure, names, series, height: int, interva
     }
 
     html = f"""
-    <div id=\"gps_plotly\" style=\"width:100%; height:{height}px;\"></div>
+    <div id=\"{div_id}\" style=\"width:100%; height:{height}px;\"></div>
     <script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>
     <script>
       const payload = {json.dumps(payload)};
-      const gd = document.getElementById('gps_plotly');
+      const gd = document.getElementById('{div_id}');
       Plotly.newPlot(gd, payload.fig.data, payload.fig.layout, {{scrollZoom:true, responsive:true}});
 
       let idx = 0;
@@ -327,10 +328,120 @@ def render_smooth_clientside(fig: go.Figure, names, series, height: int, interva
     components.html(html, height=height + 5)
 
 
+def render_constellation(
+    title: str,
+    tle_url: str,
+    key_prefix: str,
+    labels: bool,
+    show_trails: bool,
+    visible_only: bool,
+    auto_refresh: bool,
+    smooth_update: bool,
+    earth_opacity: float,
+    view_height: int,
+    lat: float,
+    lon: float,
+    elev_m: float,
+    trails_limit: int,
+    trail_points: int,
+):
+    try:
+        ts = load.timescale()
+        sat_tles = fetch_gps_tles(tle_url)
+        satellites = load_satellites(sat_tles, ts)
+        observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
+        names, positions, altitudes = snapshot_positions_eci(satellites, ts, observer=observer)
+    except Exception as e:
+        st.error(f"Failed to load {title} satellite data: {e}")
+        return
+
+    earth_trace = None
+    texture_source = None
+    try:
+        texture, texture_source = fetch_earth_texture(EARTH_TEXTURE_URLS)
+        earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
+    except Exception as e:
+        st.warning(f"Earth texture unavailable, using fallback sphere. Details: {e}")
+
+    if visible_only:
+        mask = [alt is not None and alt > 0 for alt in altitudes]
+        names = [n for n, m in zip(names, mask) if m]
+        positions = np.array([p for p, m in zip(positions, mask) if m]) if any(mask) else np.empty((0, 3))
+        sats_for_trails = [s for s, m in zip(satellites, mask) if m]
+    else:
+        sats_for_trails = satellites
+
+    if len(names) == 0:
+        st.warning(f"No {title} satellites are above horizon for this observer at this moment.")
+        return
+
+    trails = None
+    selected = sats_for_trails[:trails_limit]
+    selected_names = [s.name for s in selected]
+    selected_tles = [t for t in sat_tles if t[0] in selected_names]
+    if show_trails:
+        trails = orbit_trails_eci_cached(tuple(selected_tles), points_per_orbit=trail_points)
+
+    static_signature = (
+        bool(show_trails),
+        tuple(s.name for s in selected),
+        int(view_height),
+        float(earth_opacity),
+        bool(earth_trace is not None),
+        int(trail_points),
+        title,
+    )
+    sig_key = f"{key_prefix}_static_signature"
+    fig_key = f"{key_prefix}_static_fig"
+
+    if st.session_state.get(sig_key) != static_signature:
+        st.session_state[sig_key] = static_signature
+        st.session_state[fig_key] = _base_figure(trails=trails, earth_trace=earth_trace, height=view_height)
+
+    fig = go.Figure(st.session_state[fig_key])
+    mode = "markers+text" if labels else "markers"
+    fig.add_trace(
+        go.Scatter3d(
+            x=positions[:, 0],
+            y=positions[:, 1],
+            z=positions[:, 2],
+            mode=mode,
+            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
+            text=names if labels else None,
+            textposition="top center",
+            hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
+            name=f"{title} satellites",
+        )
+    )
+
+    st.success(f"Showing {len(names)} {title} satellites{' above horizon' if visible_only else ''}")
+
+    if auto_refresh and smooth_update:
+        future_series = future_positions_eci_cached(tuple(selected_tles), steps=20, step_seconds=30)
+        render_smooth_clientside(
+            fig,
+            names,
+            future_series,
+            height=view_height,
+            interval_ms=30_000,
+            div_id=f"plot_{key_prefix}",
+        )
+        st.caption("Smooth mode: satellites update in-browser every 30s without full app redraw.")
+    else:
+        st.plotly_chart(fig, width="stretch", config={"scrollZoom": True})
+
+    if texture_source:
+        st.caption(f"Earth texture source: {texture_source}")
+    if show_trails:
+        st.caption("Orbit trails show approximately one complete orbital period per selected satellite.")
+    if visible_only:
+        st.caption("Visibility criterion: elevation angle > 0° from observer location.")
+
+
 def main():
     st.set_page_config(page_title="GPS Demo", page_icon="🛰️", layout="wide")
-    st.title("🛰️ GPS Demo: 3D Earth + Live GPS Satellites")
-    st.caption("Near real-time = live GPS TLE + current propagation (SGP4). Visualization uses inertial (ECI-like) coordinates for clean orbital circles.")
+    st.title("🛰️ GNSS Demo: GPS + BeiDou")
+    st.caption("Near real-time = live TLE + current propagation (SGP4). Visualization uses inertial coordinates for orbital circles.")
 
     with st.sidebar:
         st.markdown("### Display Options")
@@ -358,97 +469,22 @@ def main():
     with c2:
         st.write(f"UTC now: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}Z")
 
-    try:
-        ts = load.timescale()
-        sat_tles = fetch_gps_tles(GPS_TLE_URL)
-        satellites = load_satellites(sat_tles, ts)
-        observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
-        names, positions, altitudes = snapshot_positions_eci(satellites, ts, observer=observer)
-    except Exception as e:
-        st.error(f"Failed to load GPS satellite data: {e}")
-        return
+    tab1, tab2 = st.tabs(["GPS", "BeiDou"])
 
-    earth_trace = None
-    texture_source = None
-    try:
-        texture, texture_source = fetch_earth_texture(EARTH_TEXTURE_URLS)
-        earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
-    except Exception as e:
-        st.warning(f"Earth texture unavailable, using fallback sphere. Details: {e}")
-
-    if visible_only:
-        mask = [alt is not None and alt > 0 for alt in altitudes]
-        names = [n for n, m in zip(names, mask) if m]
-        positions = np.array([p for p, m in zip(positions, mask) if m]) if any(mask) else np.empty((0, 3))
-        sats_for_trails = [s for s, m in zip(satellites, mask) if m]
-    else:
-        sats_for_trails = satellites
-
-    if len(names) == 0:
-        st.warning("No GPS satellites are above horizon for this observer at this moment.")
-        return
-
-    trails = None
-    selected = sats_for_trails[:trails_limit]
-    selected_names = [s.name for s in selected]
-    selected_tles = [t for t in sat_tles if t[0] in selected_names]
-    if show_trails:
-        trails = orbit_trails_eci_cached(tuple(selected_tles), points_per_orbit=trail_points)
-
-    # Build static layers once per setting set; update only satellite points every refresh cycle.
-    static_signature = (
-        bool(show_trails),
-        tuple(s.name for s in selected),
-        int(view_height),
-        float(earth_opacity),
-        bool(earth_trace is not None),
-        int(trail_points),
-    )
-    if st.session_state.get("gps_static_signature") != static_signature:
-        st.session_state.gps_static_signature = static_signature
-        st.session_state.gps_static_fig = _base_figure(trails=trails, earth_trace=earth_trace, height=view_height)
-
-    fig = go.Figure(st.session_state.gps_static_fig)
-    mode = "markers+text" if labels else "markers"
-    fig.add_trace(
-        go.Scatter3d(
-            x=positions[:, 0],
-            y=positions[:, 1],
-            z=positions[:, 2],
-            mode=mode,
-            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
-            text=names if labels else None,
-            textposition="top center",
-            hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
-            name="GPS satellites",
-        )
-    )
-
-    st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
-
-    if auto_refresh and smooth_update:
-        future_series = future_positions_eci_cached(tuple(selected_tles), steps=20, step_seconds=30)
-        render_smooth_clientside(fig, names, future_series, height=view_height, interval_ms=30_000)
-        st.caption("Smooth mode: satellites update in-browser every 30s without full app redraw.")
-    else:
-        st.plotly_chart(
-            fig,
-            width="stretch",
-            config={"scrollZoom": True},
+    with tab1:
+        render_constellation(
+            "GPS", GPS_TLE_URL, "gps", labels, show_trails, visible_only, auto_refresh, smooth_update,
+            earth_opacity, view_height, lat, lon, elev_m, trails_limit, trail_points,
         )
 
-    if texture_source:
-        st.caption(f"Earth texture source: {texture_source}")
-
-    if show_trails:
-        st.caption("Orbit trails show approximately one complete orbital period per selected satellite.")
-
-    if visible_only:
-        st.caption("Visibility criterion: elevation angle > 0° from observer location.")
+    with tab2:
+        render_constellation(
+            "BeiDou", BEIDOU_TLE_URL, "beidou", labels, show_trails, visible_only, auto_refresh, smooth_update,
+            earth_opacity, view_height, lat, lon, elev_m, trails_limit, trail_points,
+        )
 
     if auto_refresh and not smooth_update:
-        # fallback rerun mode
-        st_autorefresh(interval=30_000, key="gps_auto_refresh")
+        st_autorefresh(interval=30_000, key="gnss_auto_refresh")
 
 
 if __name__ == "__main__":
