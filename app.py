@@ -16,7 +16,7 @@ from skyfield.framelib import itrs
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
-LOCAL_TEXTURE_PATH = Path(__file__).parent / "assets" / "earth_2048.png"
+LOCAL_TEXTURE_PATH = Path(__file__).parent / "assets" / "earth_beauty.jpg"
 EARTH_TEXTURE_URLS = [
     "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57730/land_ocean_ice_2048.png",
     "https://www.solarsystemscope.com/textures/download/2k_earth_daymap.jpg",
@@ -150,7 +150,7 @@ def orbit_trails_ecef(satellites, ts, minutes_span=45, step_min=5):
     return trails
 
 
-def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
+def make_figure(names, positions, labels=False, trails=None, earth_trace=None, height=920):
     fig = go.Figure()
 
     if earth_trace is not None:
@@ -175,6 +175,26 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
             )
         )
 
+    # Atmosphere shell for nicer visuals
+    u2 = np.linspace(0, 2 * np.pi, 64)
+    v2 = np.linspace(0, np.pi, 64)
+    r_atm = R_EARTH_KM * 1.025
+    xa = r_atm * np.outer(np.cos(u2), np.sin(v2))
+    ya = r_atm * np.outer(np.sin(u2), np.sin(v2))
+    za = r_atm * np.outer(np.ones_like(u2), np.cos(v2))
+    fig.add_trace(
+        go.Surface(
+            x=xa,
+            y=ya,
+            z=za,
+            showscale=False,
+            opacity=0.10,
+            colorscale=[[0, "#6bbcff"], [1, "#6bbcff"]],
+            hoverinfo="skip",
+            name="Atmosphere",
+        )
+    )
+
     mode = "markers+text" if labels else "markers"
     fig.add_trace(
         go.Scatter3d(
@@ -182,7 +202,7 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
             y=positions[:, 1],
             z=positions[:, 2],
             mode=mode,
-            marker=dict(size=4, color="#ffcc00"),
+            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
             text=names if labels else None,
             textposition="top center",
             hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
@@ -213,13 +233,18 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
             xaxis_title="X (km)",
             yaxis_title="Y (km)",
             zaxis_title="Z (km)",
-            xaxis=dict(range=[-lim, lim]),
-            yaxis=dict(range=[-lim, lim]),
-            zaxis=dict(range=[-lim, lim]),
+            xaxis=dict(range=[-lim, lim], showbackground=False),
+            yaxis=dict(range=[-lim, lim], showbackground=False),
+            zaxis=dict(range=[-lim, lim], showbackground=False),
             aspectmode="cube",
+            bgcolor="#020611",
+            camera=dict(eye=dict(x=1.7, y=1.7, z=1.0)),
         ),
+        paper_bgcolor="#020611",
+        plot_bgcolor="#020611",
+        font=dict(color="#e8f1ff"),
         margin=dict(l=0, r=0, t=40, b=0),
-        height=780,
+        height=height,
         title="GPS Constellation (Earth-fixed frame, real scale)",
     )
     return fig
@@ -236,7 +261,8 @@ def main():
         show_trails = st.checkbox("Show orbit trails", value=True)
         visible_only = st.checkbox("Only satellites above horizon", value=False)
         auto_refresh = st.checkbox("Auto-refresh every 30s", value=True)
-        earth_opacity = st.slider("Earth transparency", min_value=0.15, max_value=1.0, value=0.72, step=0.01)
+        earth_opacity = st.slider("Earth transparency", min_value=0.15, max_value=1.0, value=0.62, step=0.01)
+        view_height = st.slider("3D view height", min_value=760, max_value=1300, value=980, step=20)
 
         st.markdown("### Observer Location (for horizon filter)")
         lat = st.number_input("Latitude", min_value=-90.0, max_value=90.0, value=41.8781, step=0.0001)
@@ -289,7 +315,11 @@ def main():
         trails = orbit_trails_ecef(selected, ts)
 
     st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
-    st.plotly_chart(make_figure(names, positions, labels=labels, trails=trails, earth_trace=earth_trace), width="stretch", config={"scrollZoom": False})
+    st.plotly_chart(
+        make_figure(names, positions, labels=labels, trails=trails, earth_trace=earth_trace, height=view_height),
+        width="stretch",
+        config={"scrollZoom": False},
+    )
     if texture_source:
         st.caption(f"Earth texture source: {texture_source}")
 
