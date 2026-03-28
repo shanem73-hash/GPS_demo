@@ -12,7 +12,6 @@ from PIL import Image
 from io import BytesIO
 from pathlib import Path
 from skyfield.api import EarthSatellite, load, wgs84
-from skyfield.framelib import itrs
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
@@ -116,13 +115,13 @@ def load_satellites(sat_tles, ts):
     return [EarthSatellite(l1, l2, name, ts) for name, l1, l2 in sat_tles]
 
 
-def snapshot_positions_ecef(satellites, ts, observer=None):
+def snapshot_positions_eci(satellites, ts, observer=None):
     t = ts.now()
     names, pos, altitudes = [], [], []
 
     for sat in satellites:
         geocentric = sat.at(t)
-        x_km, y_km, z_km = geocentric.frame_xyz(itrs).km  # Earth-fixed frame
+        x_km, y_km, z_km = geocentric.position.km  # Inertial frame for circular orbital-plane view
 
         alt_deg = None
         if observer is not None:
@@ -138,8 +137,8 @@ def snapshot_positions_ecef(satellites, ts, observer=None):
 
 
 @st.cache_data(ttl=600)
-def orbit_trails_ecef_cached(selected_tles, points_per_orbit=140):
-    """Compute one full orbital period trail for each satellite (ECEF frame)."""
+def orbit_trails_eci_cached(selected_tles, points_per_orbit=140):
+    """Compute one full orbital period trail for each satellite (ECI/inertial frame)."""
     ts = load.timescale()
     t0 = ts.now()
     trails = {}
@@ -155,7 +154,7 @@ def orbit_trails_ecef_cached(selected_tles, points_per_orbit=140):
         tt = t0.tt + mins / 1440.0
         t_arr = ts.tt_jd(tt)
 
-        p = sat.at(t_arr).frame_xyz(itrs).km
+        p = sat.at(t_arr).position.km
         trails[name] = p.T  # (N,3)
 
     return trails
@@ -241,7 +240,7 @@ def _base_figure(trails=None, earth_trace=None, height=920):
         font=dict(color="#e8f1ff"),
         margin=dict(l=0, r=0, t=40, b=0),
         height=height,
-        title="GPS Constellation (Earth-fixed frame, real scale)",
+        title="GPS Constellation (Inertial frame, real scale)",
     )
     return fig
 
@@ -268,7 +267,7 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None, h
 def main():
     st.set_page_config(page_title="GPS Demo", page_icon="🛰️", layout="wide")
     st.title("🛰️ GPS Demo: 3D Earth + Live GPS Satellites")
-    st.caption("Near real-time = live GPS TLE + current propagation (SGP4). Coordinates shown in Earth-fixed (ITRS/ECEF) frame.")
+    st.caption("Near real-time = live GPS TLE + current propagation (SGP4). Visualization uses inertial (ECI-like) coordinates for clean orbital circles.")
 
     with st.sidebar:
         st.markdown("### Display Options")
@@ -300,7 +299,7 @@ def main():
         sat_tles = fetch_gps_tles(GPS_TLE_URL)
         satellites = load_satellites(sat_tles, ts)
         observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
-        names, positions, altitudes = snapshot_positions_ecef(satellites, ts, observer=observer)
+        names, positions, altitudes = snapshot_positions_eci(satellites, ts, observer=observer)
     except Exception as e:
         st.error(f"Failed to load GPS satellite data: {e}")
         return
@@ -330,7 +329,7 @@ def main():
     selected_names = [s.name for s in selected]
     selected_tles = [t for t in sat_tles if t[0] in selected_names]
     if show_trails:
-        trails = orbit_trails_ecef_cached(tuple(selected_tles), points_per_orbit=trail_points)
+        trails = orbit_trails_eci_cached(tuple(selected_tles), points_per_orbit=trail_points)
 
     # Build static layers once per setting set; update only satellite points every refresh cycle.
     static_signature = (
