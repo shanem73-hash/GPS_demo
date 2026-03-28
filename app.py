@@ -118,7 +118,8 @@ def load_satellites(sat_tles, ts):
 
 
 def snapshot_positions_eci(satellites, ts, observer=None, t=None):
-    t = t or ts.now()
+    if t is None:
+        t = ts.now()
     names, pos, altitudes = [], [], []
 
     for sat in satellites:
