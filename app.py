@@ -137,20 +137,31 @@ def snapshot_positions_ecef(satellites, ts, observer=None):
     return names, np.array(pos), altitudes
 
 
-def orbit_trails_ecef(satellites, ts, minutes_span=45, step_min=5):
+@st.cache_data(ttl=600)
+def orbit_trails_ecef_cached(selected_tles, points_per_orbit=140):
+    """Compute one full orbital period trail for each satellite (ECEF frame)."""
+    ts = load.timescale()
     t0 = ts.now()
-    mins = np.arange(-minutes_span, minutes_span + step_min, step_min)
-    tt = t0.tt + mins / 1440.0
-    t_arr = ts.tt_jd(tt)
-
     trails = {}
-    for sat in satellites:
-        p = sat.at(t_arr).frame_xyz(itrs).km  # same Earth-fixed frame
-        trails[sat.name] = p.T  # (N,3)
+
+    for name, l1, l2 in selected_tles:
+        sat = EarthSatellite(l1, l2, name, ts)
+        n_rad_per_min = float(getattr(sat.model, "no_kozai", 0.0))
+        if n_rad_per_min <= 0:
+            continue
+        period_min = 2 * np.pi / n_rad_per_min
+
+        mins = np.linspace(0.0, period_min, points_per_orbit)
+        tt = t0.tt + mins / 1440.0
+        t_arr = ts.tt_jd(tt)
+
+        p = sat.at(t_arr).frame_xyz(itrs).km
+        trails[name] = p.T  # (N,3)
+
     return trails
 
 
-def make_figure(names, positions, labels=False, trails=None, earth_trace=None, height=920):
+def _base_figure(trails=None, earth_trace=None, height=920):
     fig = go.Figure()
 
     if earth_trace is not None:
@@ -195,21 +206,6 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None, h
         )
     )
 
-    mode = "markers+text" if labels else "markers"
-    fig.add_trace(
-        go.Scatter3d(
-            x=positions[:, 0],
-            y=positions[:, 1],
-            z=positions[:, 2],
-            mode=mode,
-            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
-            text=names if labels else None,
-            textposition="top center",
-            hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
-            name="GPS satellites",
-        )
-    )
-
     if trails:
         palette = px.colors.qualitative.Set3 + px.colors.qualitative.Dark24 + px.colors.qualitative.Plotly
         for idx, (sat_name, pts) in enumerate(trails.items()):
@@ -250,6 +246,25 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None, h
     return fig
 
 
+def make_figure(names, positions, labels=False, trails=None, earth_trace=None, height=920):
+    fig = _base_figure(trails=trails, earth_trace=earth_trace, height=height)
+    mode = "markers+text" if labels else "markers"
+    fig.add_trace(
+        go.Scatter3d(
+            x=positions[:, 0],
+            y=positions[:, 1],
+            z=positions[:, 2],
+            mode=mode,
+            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
+            text=names if labels else None,
+            textposition="top center",
+            hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
+            name="GPS satellites",
+        )
+    )
+    return fig
+
+
 def main():
     st.set_page_config(page_title="GPS Demo", page_icon="🛰️", layout="wide")
     st.title("🛰️ GPS Demo: 3D Earth + Live GPS Satellites")
@@ -270,6 +285,7 @@ def main():
         elev_m = st.number_input("Elevation (m)", min_value=-100.0, max_value=9000.0, value=180.0, step=1.0)
 
         trails_limit = st.slider("Max satellites with trails", min_value=3, max_value=31, value=12)
+        trail_points = st.slider("Orbit trail resolution", min_value=80, max_value=240, value=140, step=20)
 
     c1, c2 = st.columns([1, 3])
     with c1:
@@ -310,18 +326,52 @@ def main():
         return
 
     trails = None
+    selected = sats_for_trails[:trails_limit]
+    selected_names = [s.name for s in selected]
+    selected_tles = [t for t in sat_tles if t[0] in selected_names]
     if show_trails:
-        selected = sats_for_trails[:trails_limit]
-        trails = orbit_trails_ecef(selected, ts)
+        trails = orbit_trails_ecef_cached(tuple(selected_tles), points_per_orbit=trail_points)
+
+    # Build static layers once per setting set; update only satellite points every refresh cycle.
+    static_signature = (
+        bool(show_trails),
+        tuple(s.name for s in selected),
+        int(view_height),
+        float(earth_opacity),
+        bool(earth_trace is not None),
+        int(trail_points),
+    )
+    if st.session_state.get("gps_static_signature") != static_signature:
+        st.session_state.gps_static_signature = static_signature
+        st.session_state.gps_static_fig = _base_figure(trails=trails, earth_trace=earth_trace, height=view_height)
+
+    fig = go.Figure(st.session_state.gps_static_fig)
+    mode = "markers+text" if labels else "markers"
+    fig.add_trace(
+        go.Scatter3d(
+            x=positions[:, 0],
+            y=positions[:, 1],
+            z=positions[:, 2],
+            mode=mode,
+            marker=dict(size=5, color="#ffd54f", line=dict(color="#fff8e1", width=0.5), opacity=0.95),
+            text=names if labels else None,
+            textposition="top center",
+            hovertemplate="%{text}<br>x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.0f} km<extra></extra>",
+            name="GPS satellites",
+        )
+    )
 
     st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
     st.plotly_chart(
-        make_figure(names, positions, labels=labels, trails=trails, earth_trace=earth_trace, height=view_height),
+        fig,
         width="stretch",
-        config={"scrollZoom": False},
+        config={"scrollZoom": True},
     )
     if texture_source:
         st.caption(f"Earth texture source: {texture_source}")
+
+    if show_trails:
+        st.caption("Orbit trails show approximately one complete orbital period per selected satellite.")
 
     if visible_only:
         st.caption("Visibility criterion: elevation angle > 0° from observer location.")
