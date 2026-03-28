@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 
 import numpy as np
 import plotly.graph_objects as go
@@ -116,8 +117,8 @@ def load_satellites(sat_tles, ts):
     return [EarthSatellite(l1, l2, name, ts) for name, l1, l2 in sat_tles]
 
 
-def snapshot_positions_eci(satellites, ts, observer=None):
-    t = ts.now()
+def snapshot_positions_eci(satellites, ts, observer=None, t=None):
+    t = t or ts.now()
     names, pos, altitudes = [], [], []
 
     for sat in satellites:
@@ -135,6 +136,26 @@ def snapshot_positions_eci(satellites, ts, observer=None):
         altitudes.append(alt_deg)
 
     return names, np.array(pos), altitudes
+
+
+@st.cache_data(ttl=180)
+def future_positions_eci_cached(selected_tles, steps=20, step_seconds=30):
+    ts = load.timescale()
+    t0 = ts.now()
+    series = []
+
+    satellites = [EarthSatellite(l1, l2, name, ts) for name, l1, l2 in selected_tles]
+    for k in range(steps + 1):
+        t = ts.tt_jd(t0.tt + (k * step_seconds) / 86400.0)
+        _, pos, _ = snapshot_positions_eci(satellites, ts, t=t)
+        series.append(
+            {
+                "x": pos[:, 0].tolist() if len(pos) else [],
+                "y": pos[:, 1].tolist() if len(pos) else [],
+                "z": pos[:, 2].tolist() if len(pos) else [],
+            }
+        )
+    return series
 
 
 @st.cache_data(ttl=600)
@@ -266,6 +287,43 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None, h
     return fig
 
 
+def render_smooth_clientside(fig: go.Figure, names, series, height: int, interval_ms: int = 30000):
+    fig_dict = fig.to_dict()
+    sat_trace_idx = len(fig_dict.get("data", [])) - 1
+
+    payload = {
+        "fig": fig_dict,
+        "names": names,
+        "series": series,
+        "sat_idx": sat_trace_idx,
+        "interval_ms": interval_ms,
+    }
+
+    html = f"""
+    <div id=\"gps_plotly\" style=\"width:100%; height:{height}px;\"></div>
+    <script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>
+    <script>
+      const payload = {json.dumps(payload)};
+      const gd = document.getElementById('gps_plotly');
+      Plotly.newPlot(gd, payload.fig.data, payload.fig.layout, {{scrollZoom:true, responsive:true}});
+
+      let idx = 0;
+      setInterval(() => {{
+        if (!payload.series || payload.series.length === 0) return;
+        idx = (idx + 1) % payload.series.length;
+        const p = payload.series[idx];
+        Plotly.restyle(gd, {{
+          x: [p.x],
+          y: [p.y],
+          z: [p.z],
+          text: [payload.names]
+        }}, [payload.sat_idx]);
+      }}, payload.interval_ms);
+    </script>
+    """
+    components.html(html, height=height + 5)
+
+
 def main():
     st.set_page_config(page_title="GPS Demo", page_icon="🛰️", layout="wide")
     st.title("🛰️ GPS Demo: 3D Earth + Live GPS Satellites")
@@ -276,7 +334,8 @@ def main():
         labels = st.checkbox("Show satellite labels", value=False)
         show_trails = st.checkbox("Show orbit trails", value=True)
         visible_only = st.checkbox("Only satellites above horizon", value=False)
-        auto_refresh = st.checkbox("Auto-refresh every 30s", value=True)
+        auto_refresh = st.checkbox("Update satellites every 30s", value=True)
+        smooth_update = st.checkbox("Smooth clientside updates (beta)", value=True)
         earth_opacity = st.slider("Earth transparency", min_value=0.15, max_value=1.0, value=0.62, step=0.01)
         view_height = st.slider("3D view height", min_value=760, max_value=1300, value=980, step=20)
 
@@ -363,11 +422,18 @@ def main():
     )
 
     st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
-    st.plotly_chart(
-        fig,
-        width="stretch",
-        config={"scrollZoom": True},
-    )
+
+    if auto_refresh and smooth_update:
+        future_series = future_positions_eci_cached(tuple(selected_tles), steps=20, step_seconds=30)
+        render_smooth_clientside(fig, names, future_series, height=view_height, interval_ms=30_000)
+        st.caption("Smooth mode: satellites update in-browser every 30s without full app redraw.")
+    else:
+        st.plotly_chart(
+            fig,
+            width="stretch",
+            config={"scrollZoom": True},
+        )
+
     if texture_source:
         st.caption(f"Earth texture source: {texture_source}")
 
@@ -377,8 +443,8 @@ def main():
     if visible_only:
         st.caption("Visibility criterion: elevation angle > 0° from observer location.")
 
-    if auto_refresh:
-        # Streamlit-native rerun timer (much smoother than full browser reload)
+    if auto_refresh and not smooth_update:
+        # fallback rerun mode
         st_autorefresh(interval=30_000, key="gps_auto_refresh")
 
 
