@@ -15,7 +15,10 @@ from skyfield.framelib import itrs
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
-EARTH_TEXTURE_URL = "https://eoimages.gsfc.nasa.gov/images/imagerecords/74000/74117/world.topo.bathy.200412.3x5400x2700.jpg"
+EARTH_TEXTURE_URLS = [
+    "https://upload.wikimedia.org/wikipedia/commons/0/04/Solarsystemscope_texture_8k_earth_daymap.jpg",
+    "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57752/land_ocean_ice_2048.png",
+]
 
 
 def _hex_to_rgb(hex_color: str):
@@ -24,12 +27,19 @@ def _hex_to_rgb(hex_color: str):
 
 
 @st.cache_data(ttl=86400)
-def fetch_earth_texture(url: str, width: int = 2048, height: int = 1024):
-    r = requests.get(url, timeout=20)
-    r.raise_for_status()
-    img = Image.open(BytesIO(r.content)).convert("RGB")
-    img = img.resize((width, height), Image.Resampling.LANCZOS)
-    return np.array(img)
+def fetch_earth_texture(urls, width: int = 2048, height: int = 1024):
+    last_err = None
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            img = Image.open(BytesIO(r.content)).convert("RGB")
+            img = img.resize((width, height), Image.Resampling.LANCZOS)
+            return np.array(img)
+        except Exception as e:
+            last_err = e
+            continue
+    raise RuntimeError(f"Could not load Earth texture from any source: {last_err}")
 
 
 def earth_mesh_with_texture(radius_km: float, texture: np.ndarray, n_lon=180, n_lat=90, opacity=0.75):
@@ -223,7 +233,7 @@ def main():
         observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
         names, positions, altitudes = snapshot_positions_ecef(satellites, ts, observer=observer)
 
-        texture = fetch_earth_texture(EARTH_TEXTURE_URL)
+        texture = fetch_earth_texture(EARTH_TEXTURE_URLS)
         earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
     except Exception as e:
         st.error(f"Failed to load GPS data/model: {e}")
