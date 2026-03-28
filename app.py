@@ -16,8 +16,9 @@ from skyfield.framelib import itrs
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
 EARTH_TEXTURE_URLS = [
+    "https://raw.githubusercontent.com/plotly/datasets/master/earth.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/2/2c/Blue_Marble_2002.png",
     "https://upload.wikimedia.org/wikipedia/commons/0/04/Solarsystemscope_texture_8k_earth_daymap.jpg",
-    "https://eoimages.gsfc.nasa.gov/images/imagerecords/57000/57752/land_ocean_ice_2048.png",
 ]
 
 
@@ -147,6 +148,25 @@ def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
 
     if earth_trace is not None:
         fig.add_trace(earth_trace)
+    else:
+        # Fallback Earth sphere so app still works if textures are unavailable
+        u = np.linspace(0, 2 * np.pi, 80)
+        v = np.linspace(0, np.pi, 80)
+        x = R_EARTH_KM * np.outer(np.cos(u), np.sin(v))
+        y = R_EARTH_KM * np.outer(np.sin(u), np.sin(v))
+        z = R_EARTH_KM * np.outer(np.ones_like(u), np.cos(v))
+        fig.add_trace(
+            go.Surface(
+                x=x,
+                y=y,
+                z=z,
+                showscale=False,
+                opacity=0.72,
+                colorscale=[[0, "#0b3d91"], [1, "#1f77b4"]],
+                name="Earth (fallback)",
+                hoverinfo="skip",
+            )
+        )
 
     mode = "markers+text" if labels else "markers"
     fig.add_trace(
@@ -232,12 +252,16 @@ def main():
         satellites = load_satellites(sat_tles, ts)
         observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
         names, positions, altitudes = snapshot_positions_ecef(satellites, ts, observer=observer)
+    except Exception as e:
+        st.error(f"Failed to load GPS satellite data: {e}")
+        return
 
+    earth_trace = None
+    try:
         texture = fetch_earth_texture(EARTH_TEXTURE_URLS)
         earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
     except Exception as e:
-        st.error(f"Failed to load GPS data/model: {e}")
-        return
+        st.warning(f"Earth texture unavailable, using fallback sphere. Details: {e}")
 
     if visible_only:
         mask = [alt is not None and alt > 0 for alt in altitudes]
