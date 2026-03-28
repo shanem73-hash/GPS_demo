@@ -12,6 +12,7 @@ from PIL import Image
 from io import BytesIO
 from pathlib import Path
 from skyfield.api import EarthSatellite, load, wgs84
+from streamlit_autorefresh import st_autorefresh
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
@@ -241,6 +242,7 @@ def _base_figure(trails=None, earth_trace=None, height=920):
         margin=dict(l=0, r=0, t=40, b=0),
         height=height,
         title="GPS Constellation (Inertial frame, real scale)",
+        uirevision="gps-constellation-static",
     )
     return fig
 
@@ -376,14 +378,8 @@ def main():
         st.caption("Visibility criterion: elevation angle > 0° from observer location.")
 
     if auto_refresh:
-        components.html(
-            """
-            <script>
-            setTimeout(function() { window.parent.location.reload(); }, 30000);
-            </script>
-            """,
-            height=0,
-        )
+        # Streamlit-native rerun timer (much smoother than full browser reload)
+        st_autorefresh(interval=30_000, key="gps_auto_refresh")
 
 
 if __name__ == "__main__":
