@@ -4,22 +4,77 @@ from datetime import datetime, timezone
 
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image
+from io import BytesIO
 from skyfield.api import EarthSatellite, load, wgs84
+from skyfield.framelib import itrs
 
 R_EARTH_KM = 6371.0
 GPS_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=gps-ops&FORMAT=tle"
+EARTH_TEXTURE_URL = "https://eoimages.gsfc.nasa.gov/images/imagerecords/74000/74117/world.topo.bathy.200412.3x5400x2700.jpg"
 
 
-def earth_sphere(radius_km: float = R_EARTH_KM, n: int = 60):
-    u = np.linspace(0, 2 * np.pi, n)
-    v = np.linspace(0, np.pi, n)
-    x = radius_km * np.outer(np.cos(u), np.sin(v))
-    y = radius_km * np.outer(np.sin(u), np.sin(v))
-    z = radius_km * np.outer(np.ones_like(u), np.cos(v))
-    return x, y, z
+def _hex_to_rgb(hex_color: str):
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+
+
+@st.cache_data(ttl=86400)
+def fetch_earth_texture(url: str, width: int = 2048, height: int = 1024):
+    r = requests.get(url, timeout=20)
+    r.raise_for_status()
+    img = Image.open(BytesIO(r.content)).convert("RGB")
+    img = img.resize((width, height), Image.Resampling.LANCZOS)
+    return np.array(img)
+
+
+def earth_mesh_with_texture(radius_km: float, texture: np.ndarray, n_lon=180, n_lat=90, opacity=0.75):
+    lons = np.linspace(-np.pi, np.pi, n_lon)
+    lats = np.linspace(-np.pi / 2, np.pi / 2, n_lat)
+
+    lon_grid, lat_grid = np.meshgrid(lons, lats)
+    x = radius_km * np.cos(lat_grid) * np.cos(lon_grid)
+    y = radius_km * np.cos(lat_grid) * np.sin(lon_grid)
+    z = radius_km * np.sin(lat_grid)
+
+    xv, yv, zv = x.ravel(), y.ravel(), z.ravel()
+
+    tex_h, tex_w, _ = texture.shape
+    u = (lon_grid + np.pi) / (2 * np.pi)
+    v = (np.pi / 2 - lat_grid) / np.pi
+    px = np.clip((u * (tex_w - 1)).astype(int), 0, tex_w - 1)
+    py = np.clip((v * (tex_h - 1)).astype(int), 0, tex_h - 1)
+    sampled = texture[py, px].reshape(-1, 3)
+    vertexcolor = [f"rgb({r},{g},{b})" for r, g, b in sampled]
+
+    I, J, K = [], [], []
+    for r in range(n_lat - 1):
+        for c in range(n_lon - 1):
+            p0 = r * n_lon + c
+            p1 = p0 + 1
+            p2 = p0 + n_lon
+            p3 = p2 + 1
+            I.extend([p0, p0])
+            J.extend([p2, p1])
+            K.extend([p1, p3])
+
+    return go.Mesh3d(
+        x=xv,
+        y=yv,
+        z=zv,
+        i=I,
+        j=J,
+        k=K,
+        vertexcolor=vertexcolor,
+        opacity=opacity,
+        name="Earth (textured)",
+        hoverinfo="skip",
+        flatshading=False,
+    )
 
 
 @st.cache_data(ttl=300)
@@ -43,13 +98,13 @@ def load_satellites(sat_tles, ts):
     return [EarthSatellite(l1, l2, name, ts) for name, l1, l2 in sat_tles]
 
 
-def snapshot_positions(satellites, ts, observer=None):
+def snapshot_positions_ecef(satellites, ts, observer=None):
     t = ts.now()
     names, pos, altitudes = [], [], []
 
     for sat in satellites:
         geocentric = sat.at(t)
-        x_km, y_km, z_km = geocentric.position.km
+        x_km, y_km, z_km = geocentric.frame_xyz(itrs).km  # Earth-fixed frame
 
         alt_deg = None
         if observer is not None:
@@ -64,8 +119,7 @@ def snapshot_positions(satellites, ts, observer=None):
     return names, np.array(pos), altitudes
 
 
-def orbit_trails(satellites, ts, minutes_span=45, step_min=5):
-    # Times around now: [-span, ..., +span] minutes
+def orbit_trails_ecef(satellites, ts, minutes_span=45, step_min=5):
     t0 = ts.now()
     mins = np.arange(-minutes_span, minutes_span + step_min, step_min)
     tt = t0.tt + mins / 1440.0
@@ -73,27 +127,16 @@ def orbit_trails(satellites, ts, minutes_span=45, step_min=5):
 
     trails = {}
     for sat in satellites:
-        p = sat.at(t_arr).position.km
-        trails[sat.name] = p.T  # shape (N,3)
+        p = sat.at(t_arr).frame_xyz(itrs).km  # same Earth-fixed frame
+        trails[sat.name] = p.T  # (N,3)
     return trails
 
 
-def make_figure(names, positions, labels=False, trails=None):
-    ex, ey, ez = earth_sphere()
-
+def make_figure(names, positions, labels=False, trails=None, earth_trace=None):
     fig = go.Figure()
-    fig.add_trace(
-        go.Surface(
-            x=ex,
-            y=ey,
-            z=ez,
-            showscale=False,
-            opacity=0.85,
-            colorscale=[[0, "#0b3d91"], [1, "#1f77b4"]],
-            name="Earth",
-            hoverinfo="skip",
-        )
-    )
+
+    if earth_trace is not None:
+        fig.add_trace(earth_trace)
 
     mode = "markers+text" if labels else "markers"
     fig.add_trace(
@@ -111,21 +154,23 @@ def make_figure(names, positions, labels=False, trails=None):
     )
 
     if trails:
-        for sat_name, pts in trails.items():
+        palette = px.colors.qualitative.Set3 + px.colors.qualitative.Dark24 + px.colors.qualitative.Plotly
+        for idx, (sat_name, pts) in enumerate(trails.items()):
+            clr = palette[idx % len(palette)]
             fig.add_trace(
                 go.Scatter3d(
                     x=pts[:, 0],
                     y=pts[:, 1],
                     z=pts[:, 2],
                     mode="lines",
-                    line=dict(width=2, color="rgba(255, 204, 0, 0.55)"),
+                    line=dict(width=3, color=clr),
                     name=f"Trail: {sat_name}",
                     showlegend=False,
                     hoverinfo="skip",
                 )
             )
 
-    lim = 28000
+    lim = 30000
     fig.update_layout(
         scene=dict(
             xaxis_title="X (km)",
@@ -137,8 +182,8 @@ def make_figure(names, positions, labels=False, trails=None):
             aspectmode="cube",
         ),
         margin=dict(l=0, r=0, t=40, b=0),
-        height=760,
-        title="GPS Constellation (near real-time from live TLE)",
+        height=780,
+        title="GPS Constellation (Earth-fixed frame, real scale)",
     )
     return fig
 
@@ -146,7 +191,7 @@ def make_figure(names, positions, labels=False, trails=None):
 def main():
     st.set_page_config(page_title="GPS Demo", page_icon="🛰️", layout="wide")
     st.title("🛰️ GPS Demo: 3D Earth + Live GPS Satellites")
-    st.caption("Satellite positions are propagated from current CelesTrak TLE data (near real-time, not raw telemetry).")
+    st.caption("Near real-time = live GPS TLE + current propagation (SGP4). Coordinates shown in Earth-fixed (ITRS/ECEF) frame.")
 
     with st.sidebar:
         st.markdown("### Display Options")
@@ -154,6 +199,7 @@ def main():
         show_trails = st.checkbox("Show orbit trails", value=True)
         visible_only = st.checkbox("Only satellites above horizon", value=False)
         auto_refresh = st.checkbox("Auto-refresh every 30s", value=True)
+        earth_opacity = st.slider("Earth transparency", min_value=0.15, max_value=1.0, value=0.72, step=0.01)
 
         st.markdown("### Observer Location (for horizon filter)")
         lat = st.number_input("Latitude", min_value=-90.0, max_value=90.0, value=41.8781, step=0.0001)
@@ -174,14 +220,15 @@ def main():
         ts = load.timescale()
         sat_tles = fetch_gps_tles(GPS_TLE_URL)
         satellites = load_satellites(sat_tles, ts)
-
         observer = wgs84.latlon(lat, lon, elevation_m=elev_m)
-        names, positions, altitudes = snapshot_positions(satellites, ts, observer=observer)
+        names, positions, altitudes = snapshot_positions_ecef(satellites, ts, observer=observer)
+
+        texture = fetch_earth_texture(EARTH_TEXTURE_URL)
+        earth_trace = earth_mesh_with_texture(R_EARTH_KM, texture, opacity=earth_opacity)
     except Exception as e:
-        st.error(f"Failed to load GPS data: {e}")
+        st.error(f"Failed to load GPS data/model: {e}")
         return
 
-    # Filter visible only if requested
     if visible_only:
         mask = [alt is not None and alt > 0 for alt in altitudes]
         names = [n for n, m in zip(names, mask) if m]
@@ -197,18 +244,15 @@ def main():
     trails = None
     if show_trails:
         selected = sats_for_trails[:trails_limit]
-        trails = orbit_trails(selected, ts)
+        trails = orbit_trails_ecef(selected, ts)
 
     st.success(f"Showing {len(names)} satellites{' above horizon' if visible_only else ''}")
-    st.plotly_chart(make_figure(names, positions, labels=labels, trails=trails), use_container_width=True, config={"scrollZoom": False})
+    st.plotly_chart(make_figure(names, positions, labels=labels, trails=trails, earth_trace=earth_trace), width="stretch", config={"scrollZoom": False})
 
     if visible_only:
-        st.caption("Visibility test uses observer location and altitude > 0° horizon criterion.")
-
-    st.info("Note: 'Real-time' here means live orbital elements + current-time propagation (SGP4).")
+        st.caption("Visibility criterion: elevation angle > 0° from observer location.")
 
     if auto_refresh:
-        # Browser-side refresh every 30 seconds
         components.html(
             """
             <script>
